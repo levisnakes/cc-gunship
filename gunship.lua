@@ -7,6 +7,7 @@
 --
 -- Keys: A arm/safe   N next target   C auto target   F fire ready cannons
 --       X ignore this target for good (parts of your own ship)   U un-ignore all
+--       T test: swing every cannon through a few angles (no firing, ignores targets)
 -- While SAFE the cannons still aim, so you can check them without shooting.
 
 CANNON_SPEED = 8          -- shell speed in blocks/tick: 2 per Powder Charge (4 charges = 8)
@@ -37,7 +38,7 @@ end
 
 -- ============================================================ math
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local sin, cos, sqrt, abs, deg, rad = math.sin, math.cos, math.sqrt, math.abs, math.deg, math.rad
 local LOOP = 0.15
@@ -348,6 +349,8 @@ local armed = false
 local lastAnyShot = -999
 local target = nil
 local forceFire = false
+local testMode, testStart = false, 0
+local TEST_POSES = { { 0, 15 }, { 30, 5 }, { -30, 5 }, { 0, 0 } }
 
 -- side of the ship each mount is on, from its offset to the ship's center
 local function arcFor(m)
@@ -399,6 +402,8 @@ local function aimMount(m)
     m.state = "no reply"
     return
   end
+  -- turning computer control on resets the mount's target to where it
+  -- points now, so the angles are re-sent below whenever they differ
   if not info.computerControl then pcall(peripheral.call, m.name, "setComputerControl", true) end
   if not info.assembled then
     m.state = "not assembled"
@@ -408,6 +413,19 @@ local function aimMount(m)
   m.localPos = { x = info.x + 0.5, y = info.y + (MOUNT_UP and 1.5 or -0.5), z = info.z + 0.5 }
   m.world = toWorld(m.localPos)
   m.err = nil
+  if testMode then
+    local i = math.floor((now() - testStart) / 4) % #TEST_POSES + 1
+    local center = arcFor(m)
+    local ty, tp = wrap(center + TEST_POSES[i][1] + YAW_OFFSET), TEST_POSES[i][2] * PITCH_SIGN
+    m.wantYaw, m.wantPitch = ty, tp
+    local ok, err = pcall(peripheral.call, m.name, "setTargetAngles", ty, tp)
+    local ys, ps = tonumber(info.yawShaftSpeed), tonumber(info.pitchShaftSpeed)
+    if not ok then m.state = "error: " .. tostring(err)
+    elseif ys == 0 then m.state = "no yaw power"
+    elseif ps == 0 then m.state = "no pitch power"
+    else m.state = string.format("TEST %d/%d", i, #TEST_POSES) end
+    return
+  end
   if not target then
     m.state = "no target"
     return
@@ -428,15 +446,32 @@ local function aimMount(m)
   end
   local sendYaw, sendPitch = wrap(yaw + YAW_OFFSET), pitch * PITCH_SIGN
   m.wantYaw, m.wantPitch = sendYaw, sendPitch
-  if not m.sentYaw or abs(wrap(sendYaw - m.sentYaw)) > 0.05 or abs(sendPitch - m.sentPitch) > 0.05 then
-    pcall(peripheral.call, m.name, "setTargetAngles", sendYaw, sendPitch)
-    m.sentYaw, m.sentPitch = sendYaw, sendPitch
+  -- compare with what the mount says its target is (it clamps pitch to the
+  -- cannon's limits, so a pitch it can't reach is just re-sent each loop)
+  local ty, tp = tonumber(info.targetYaw), tonumber(info.targetPitch)
+  if not info.computerControl or not ty or not tp or abs(wrap(sendYaw - ty)) > 0.05 or abs(sendPitch - tp) > 0.05 then
+    local ok, err = pcall(peripheral.call, m.name, "setTargetAngles", sendYaw, sendPitch)
+    m.sendError = (not ok) and tostring(err) or nil
   end
   -- where the barrel really points now, in the world
   local have = qrot(pose.q, dirOf((info.yaw or 0) - YAW_OFFSET, (info.pitch or 0) * PITCH_SIGN))
   m.err = angleBetween(have, need)
   if m.err > AIM_MARGIN then
-    m.state = "aiming"
+    -- a mount turns at its shafts' speed: no rotation, no movement
+    local ys, ps = tonumber(info.yawShaftSpeed), tonumber(info.pitchShaftSpeed)
+    local dYaw = abs(wrap((info.yaw or 0) - sendYaw))
+    local dPitch = abs((info.pitch or 0) - sendPitch)
+    if m.sendError then
+      m.state = "error: " .. m.sendError
+    elseif ys == 0 and dYaw > AIM_MARGIN then
+      m.state = "no yaw power"
+    elseif ps == 0 and dPitch > AIM_MARGIN then
+      m.state = "no pitch power"
+    elseif tp and abs(tp - sendPitch) > 0.5 and abs((info.pitch or 0) - tp) < 0.5 then
+      m.state = "pitch limit"
+    else
+      m.state = "aiming"
+    end
     return
   end
   local t = now()
@@ -520,7 +555,12 @@ local function draw()
   term.setTextColor(colors.gray)
   local _, h = term.getSize()
   term.setCursorPos(1, h)
-  write("A arm  N next  C auto  X ignore  U unignore  F fire")
+  if testMode then
+    term.setTextColor(colors.orange)
+    write("TEST MODE: cannons swing every 4s.  T to stop")
+  else
+    write("A arm N next C auto X ignore U unign T test F fire")
+  end
   term.setTextColor(colors.white)
 end
 
@@ -565,6 +605,8 @@ local function keyLoop()
     elseif k == keys.u then
       ignored = {}
       saveIgnored()
+    elseif k == keys.t then
+      testMode, testStart = not testMode, now()
     elseif k == keys.f then
       forceFire = true
     end

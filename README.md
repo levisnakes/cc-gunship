@@ -32,8 +32,17 @@ It starts **SAFE**: the cannons aim but don't fire. Press **A** to arm.
 | F | fire every cannon that's on target now, even when SAFE |
 | X | ignore this target for good (use it on parts of your own ship, like swivel-bearing sublevels) |
 | U | un-ignore everything |
+| T | test mode: every cannon swings through a few angles every 4 s (never fires) |
 
 Each cannon row shows its error in degrees, its state, and `yaw/pitch now > wanted`.
+
+## Cannons not moving?
+
+Press **T**. Every cannon should swing every 4 seconds. If one doesn't, its row tells you why:
+
+- **no yaw power** / **no pitch power**: that shaft isn't turning. Power the mount's yaw input (bottom) and pitch input (side).
+- **not assembled**: arm once (A), and it assembles the cannon, or assemble it by hand.
+- **error: ...**: the mount refused the command; send a screenshot.
 
 ## Check the aim before arming
 
