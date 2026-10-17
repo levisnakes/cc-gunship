@@ -42,6 +42,12 @@ Each cannon row shows its error in degrees, its state, and `yaw/pitch now > want
 3. If the barrels aim down when they should aim up, set `PITCH_SIGN = -1`.
 4. If shells fall short or fly long, set `CANNON_SPEED` to 2 x your powder charges (4 charges = 8).
 
+## Radar Bearing notes
+
+A Radar Bearing only updates a contact when its spinning dish sweeps over it, and drops contacts it hasn't swept for a while. Gunship keeps its lock through those gaps and aims at where the target should be now (screen: "radar lost it Ns ago"). A faster-spinning dish means fresher positions and better aim.
+
+Parts of your own ship that are separate sublevels (anything on a swivel or physics bearing) show up as their own "ships". Press **X** while one is the target and it's ignored for good.
+
 ## Which cannon shoots when
 
 Each cannon works out which side of the ship it's on and only fires inside a `ARC`-degree arc on that side, so it never shoots across your own deck. Override one with `ARCS["cannon_mount_0"] = { center = 90, width = 120 }` (yaw in the ship's frame: 0 = +Z, 90 = -X, 180 = -Z, 270 = +X).
@@ -62,5 +68,6 @@ Cannons hold fire while the ship rocks faster than `MAX_ROCK` deg/s, and shots a
 | `MIN_RANGE` / `MAX_RANGE` | 20 / 400 | |
 | `TARGETS` | Sable ships only | also `PLAYER`, `HOSTILE`, `MOB`, `ANIMAL` |
 | `OWN_SHIP_RADIUS` | 20 | your own ship is also skipped by its id |
+| `LOCK_MEMORY` | 15 | seconds it keeps following a target after the radar last saw it |
 
 Updates install by themselves (every 15 min and on reboot), keeping your settings. `AUTO_UPDATE = false` turns that off.

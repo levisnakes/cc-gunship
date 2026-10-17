@@ -21,6 +21,7 @@ MAX_RANGE = 400
 MIN_RANGE = 20
 TARGETS = { SABLE = true, PLAYER = false, HOSTILE = false, MOB = false, ANIMAL = false }
 OWN_SHIP_RADIUS = 20      -- tracks this close to your ship's center are never targets
+LOCK_MEMORY = 15          -- keep following a target this many seconds after the radar last swept it
 ARC = 160                 -- each cannon's firing arc in degrees, centred on its side of the ship
 ARCS = {}                 -- per cannon, e.g. ARCS["cannon_mount_0"] = { center = 90, width = 120 }
 YAW_OFFSET = 0            -- calibration if every cannon points the same wrong way
@@ -36,7 +37,7 @@ end
 
 -- ============================================================ math
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local sin, cos, sqrt, abs, deg, rad = math.sin, math.cos, math.sqrt, math.abs, math.deg, math.rad
 local LOOP = 0.15
@@ -227,7 +228,7 @@ local function scanTicks(st) return st / scanUnit end
 local function trackPos(s)
   local age = now() - s.t
   if scanUnit and s.st then age = (now() * 20 - (scanTicks(s.st) + scanOffset)) / 20 end
-  age = math.max(0, math.min(age, 3)) * 20
+  age = math.max(0, math.min(age, LOCK_MEMORY)) * 20
   return { x = s.p.x + s.v.x * age, y = s.p.y + s.v.y * age, z = s.p.z + s.v.z * age }
 end
 
@@ -285,7 +286,8 @@ local function scan()
       s.seenAt = t
       s.cat = tostring(tr.category)
       s.kind = tostring(tr.entityType or "")
-      if TARGETS[s.cat] and not ignored[id] and not isOwnShip(tr) then
+      s.ok = TARGETS[s.cat] and not isOwnShip(tr)
+      if s.ok and not ignored[id] then
         local d = len({ x = p.x - pose.pos.x, y = p.y - pose.pos.y, z = p.z - pose.pos.z })
         if d >= MIN_RANGE and d <= MAX_RANGE then
           out[#out + 1] = { id = id, d = d, s = s }
@@ -294,7 +296,7 @@ local function scan()
     end
   end
   for id, s in pairs(seen) do
-    if t - (s.seenAt or 0) > 10 then seen[id] = nil end
+    if t - (s.seenAt or 0) > LOCK_MEMORY + 5 then seen[id] = nil end
   end
   table.sort(out, function(a, b) return a.d < b.d end)
   tracks = out
@@ -315,6 +317,14 @@ local function pickTarget()
   end
   for _, tr in ipairs(tracks) do
     if tr.id == lockId then return tr end
+  end
+  -- a Radar Bearing only lists what its dish swept recently: keep the lock
+  -- through the gaps and follow the target's predicted position
+  local s = lockId and seen[lockId]
+  if s and s.ok and not ignored[lockId] and now() - s.seenAt <= LOCK_MEMORY then
+    local p = trackPos(s)
+    local d = len({ x = p.x - pose.pos.x, y = p.y - pose.pos.y, z = p.z - pose.pos.z })
+    if d <= MAX_RANGE then return { id = lockId, d = d, s = s, memory = true } end
   end
   manualPick = false
   local tr = tracks[1]
@@ -479,7 +489,9 @@ local function draw()
     term.setTextColor(colors.orange)
     print(string.format("Target: %s %s  %.0fm  %.0f m/s %s", s.cat, s.kind:sub(1, 14), target.d, spd,
       manualPick and "[picked]" or "[auto]"))
-    print(string.format("  %+.0f blocks above you   id %s", s.p.y - pose.pos.y, target.id:sub(1, 8)))
+    local ago = now() - s.seenAt
+    print(string.format("  %+.0f blocks above you   id %s   %s", s.p.y - pose.pos.y, target.id:sub(1, 8),
+      target.memory and string.format("radar lost it %.0fs ago", ago) or "on radar"))
     term.setTextColor(colors.white)
   else
     print("Target: none in range")
