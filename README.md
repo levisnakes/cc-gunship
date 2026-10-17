@@ -57,6 +57,12 @@ A Radar Bearing only updates a contact when its spinning dish sweeps over it, an
 
 Parts of your own ship that are separate sublevels (anything on a swivel or physics bearing) show up as their own "ships". Press **X** while one is the target and it's ignored for good.
 
+## Moving targets
+
+Gunship uses the velocity the radar reports for each contact (Sable ships report it in blocks per second; it learns the unit from your own ship's movement, shown as "velocity units" on screen). It also measures how fast a target is turning between sweeps and predicts along that curve, then leads the shot by the shell's flight time.
+
+If a lock is dropped, the screen says why for 15 seconds (gone from radar, out of range, ignored, ...).
+
 ## Which cannon shoots when
 
 Each cannon works out which side of the ship it's on and only fires inside a `ARC`-degree arc on that side, so it never shoots across your own deck. Override one with `ARCS["cannon_mount_0"] = { center = 90, width = 120 }` (yaw in the ship's frame: 0 = +Z, 90 = -X, 180 = -Z, 270 = +X).

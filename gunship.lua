@@ -38,7 +38,7 @@ end
 
 -- ============================================================ math
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local sin, cos, sqrt, abs, deg, rad = math.sin, math.cos, math.sqrt, math.abs, math.deg, math.rad
 local LOOP = 0.15
@@ -170,6 +170,17 @@ end
 local pose = nil                    -- { pos, q, rp, scale, t }
 local shipVel = { x = 0, y = 0, z = 0 }  -- blocks/tick
 local rock = 0                      -- deg/s
+-- Sable velocities (own ship + radar SABLE tracks) are blocks per second or
+-- per tick; learned by comparing the reported velocity with real movement.
+local velScale = nil
+local velVotes = { [1] = 0, [20] = 0 }
+
+local function vec(t)
+  if type(t) ~= "table" then return nil end
+  local x, y, z = tonumber(t.x), tonumber(t.y), tonumber(t.z)
+  if not (x and y and z) then return nil end
+  return { x = x, y = y, z = z }
+end
 
 local function readPose()
   local ok, p = pcall(sublevel.getLogicalPose)
@@ -179,10 +190,24 @@ local function readPose()
   local t = now()
   if pose and t > pose.t then
     local dt = (t - pose.t) * 20
-    local a = 0.5
-    shipVel = { x = shipVel.x * (1 - a) + (p.position.x - pose.pos.x) / dt * a,
-                y = shipVel.y * (1 - a) + (p.position.y - pose.pos.y) / dt * a,
-                z = shipVel.z * (1 - a) + (p.position.z - pose.pos.z) / dt * a }
+    local moved = { x = (p.position.x - pose.pos.x) / dt, y = (p.position.y - pose.pos.y) / dt, z = (p.position.z - pose.pos.z) / dt }
+    local okV, api = pcall(sublevel.getLinearVelocity)
+    api = okV and vec(api) or nil
+    if api and not velScale and len(moved) > 0.05 then
+      local r = len(api) / len(moved)
+      for _, k in ipairs({ 1, 20 }) do
+        if r > k * 0.7 and r < k * 1.3 then
+          velVotes[k] = velVotes[k] + 1
+          if velVotes[k] >= 5 then velScale = k end
+        end
+      end
+    end
+    if api and velScale then
+      shipVel = { x = api.x / velScale, y = api.y / velScale, z = api.z / velScale }
+    else
+      local a = 0.5
+      shipVel = { x = shipVel.x * (1 - a) + moved.x * a, y = shipVel.y * (1 - a) + moved.y * a, z = shipVel.z * (1 - a) + moved.z * a }
+    end
     local dq = qmul(q, qinv(pose.q))
     local w = math.min(1, abs(dq.w))
     rock = rock * 0.5 + deg(2 * math.acos(w)) / (t - pose.t) * 0.5
@@ -219,6 +244,7 @@ local function saveIgnored()
 end
 local manualPick = false
 local radarError = nil
+local lostMsg, lostAt = nil, -999
 
 -- Radar tracks carry scannedTime; once its units are known (game ticks or
 -- ms) positions are dated by the scan itself, not by when we read them.
@@ -226,11 +252,42 @@ local scanUnit, scanOffset = nil, nil   -- scanned units per tick, clock ticks -
 
 local function scanTicks(st) return st / scanUnit end
 
-local function trackPos(s)
+-- Target velocity in blocks/tick: the radar's own reading when it has one
+-- (entities report per tick; Sable ships use the learned unit), else the
+-- movement measured between sweeps.
+local function trackVel(s)
+  if s.rv then
+    local k = 1
+    if s.cat == "SABLE" then
+      k = velScale
+      if not k then
+        -- unit not learned yet: pick the one that matches what we measured
+        local m, r = len(s.v), len(s.rv)
+        if (s.vn or 0) >= 1 and m > 0.02 and abs(r / 20 - m) > abs(r - m) then k = 1 else k = 20 end
+      end
+    end
+    return { x = s.rv.x / k, y = s.rv.y / k, z = s.rv.z / k }
+  end
+  return s.v
+end
+
+-- Where the target will be `ahead` ticks from now. Follows its turn (an arc
+-- at the measured turn rate) instead of a straight line.
+local function trackPos(s, ahead)
   local age = now() - s.t
   if scanUnit and s.st then age = (now() * 20 - (scanTicks(s.st) + scanOffset)) / 20 end
-  age = math.max(0, math.min(age, LOCK_MEMORY)) * 20
-  return { x = s.p.x + s.v.x * age, y = s.p.y + s.v.y * age, z = s.p.z + s.v.z * age }
+  local a = math.max(0, math.min(age, LOCK_MEMORY)) * 20 + (ahead or 0)
+  local v = trackVel(s)
+  local w = s.turn or 0
+  local dx, dz
+  if abs(w) < 1e-5 then
+    dx, dz = v.x * a, v.z * a
+  else
+    local sn, cs = sin(w * a) / w, (1 - cos(w * a)) / w
+    dx = sn * v.x - cs * v.z
+    dz = sn * v.z + cs * v.x
+  end
+  return { x = s.p.x + dx, y = s.p.y + v.y * a, z = s.p.z + dz }
 end
 
 local function isOwnShip(t)
@@ -277,6 +334,7 @@ local function scan()
         end
         s.st = st
         if dt > 0 then
+          s.vn = (s.vn or 0) + 1
           local a = 0.6
           s.v = { x = s.v.x * (1 - a) + (p.x - s.p.x) / dt * a,
                   y = s.v.y * (1 - a) + (p.y - s.p.y) / dt * a,
@@ -285,6 +343,25 @@ local function scan()
         s.p, s.t = p, t
       end
       s.seenAt = t
+      if tr.velocity then
+        -- the velocity belongs to the scan, so only take it with a new position
+        local rv = vec(tr.velocity)
+        if rv and (not s.rvAt or s.t ~= s.rvAt) then
+          -- turn rate from how the heading changed since the last scan
+          local tick = (scanUnit and s.st and scanTicks(s.st)) or s.t * 20
+          if s.rv and s.rvTick and tick > s.rvTick then
+            local a, b = s.rv, rv
+            local sa, sb = sqrt(a.x * a.x + a.z * a.z), sqrt(b.x * b.x + b.z * b.z)
+            if sa > 0 and sb > 0 and sa > 0.05 * sb then
+              local w = atan2(a.x * b.z - a.z * b.x, a.x * b.x + a.z * b.z) / (tick - s.rvTick)
+              local cap = rad(30) / 20
+              if w > cap then w = cap elseif w < -cap then w = -cap end
+              s.turn = (s.turn or 0) * 0.4 + w * 0.6
+            end
+          end
+          s.rv, s.rvAt, s.rvTick = rv, s.t, tick
+        end
+      end
       s.cat = tostring(tr.category)
       s.kind = tostring(tr.entityType or "")
       s.ok = TARGETS[s.cat] and not isOwnShip(tr)
@@ -327,6 +404,14 @@ local function pickTarget()
     local d = len({ x = p.x - pose.pos.x, y = p.y - pose.pos.y, z = p.z - pose.pos.z })
     if d <= MAX_RANGE then return { id = lockId, d = d, s = s, memory = true } end
   end
+  if lockId then
+    local why = "gone from radar"
+    if ignored[lockId] then why = "ignored (X)"
+    elseif s and not s.ok then why = "now counts as your ship / not a target type"
+    elseif s and now() - s.seenAt > LOCK_MEMORY then why = string.format("not on radar for %ds (LOCK_MEMORY)", LOCK_MEMORY)
+    elseif s then why = "out of range (MAX_RANGE)" end
+    lostMsg, lostAt = "Lost target: " .. why, now()
+  end
   manualPick = false
   local tr = tracks[1]
   lockId = tr and tr.id or nil
@@ -366,15 +451,15 @@ end
 -- needed world direction for mount m to hit target tr, or nil + reason
 local function solve(m, tr)
   local P = trackPos(tr.s)
-  local V = tr.s.v
   local S = m.world
   local T = len({ x = P.x - S.x, y = P.y - S.y, z = P.z - S.z }) / CANNON_SPEED
   local yaw, pitch
-  for _ = 1, 3 do
+  for _ = 1, 4 do
     local c = carried(T)
-    local ax = P.x + V.x * T - shipVel.x * c - S.x
-    local ay = P.y + V.y * T - shipVel.y * c - S.y
-    local az = P.z + V.z * T - shipVel.z * c - S.z
+    local A = trackPos(tr.s, T)
+    local ax = A.x - shipVel.x * c - S.x
+    local ay = A.y - shipVel.y * c - S.y
+    local az = A.z - shipVel.z * c - S.z
     local p, t = solvePitch(sqrt(ax * ax + az * az), ay)
     if not p then return nil, t end
     yaw, pitch, T = yawOf({ x = ax, y = 0, z = az }), p, t
@@ -512,6 +597,8 @@ local function draw()
   term.setTextColor(colors.white)
   print("")
   print(string.format("Radar: %s   tracks %d   rock %.1f deg/s", radar or "NONE", #tracks, rock))
+  print(string.format("Ship speed %.1f m/s  (velocity units %s)", len(shipVel) * 20,
+    velScale and (velScale == 20 and "per second" or "per tick") or "learning"))
   if radarError then
     term.setTextColor(colors.red)
     print("Radar error: " .. radarError)
@@ -520,7 +607,7 @@ local function draw()
   print("")
   if target then
     local s = target.s
-    local spd = len(s.v) * 20
+    local spd = len(trackVel(s)) * 20
     term.setTextColor(colors.orange)
     print(string.format("Target: %s %s  %.0fm  %.0f m/s %s", s.cat, s.kind:sub(1, 14), target.d, spd,
       manualPick and "[picked]" or "[auto]"))
@@ -530,6 +617,11 @@ local function draw()
     term.setTextColor(colors.white)
   else
     print("Target: none in range")
+  end
+  if lostMsg and now() - lostAt < 15 then
+    term.setTextColor(colors.red)
+    print(lostMsg)
+    term.setTextColor(colors.white)
   end
   print("")
   for _, m in ipairs(mounts) do
