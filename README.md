@@ -30,6 +30,10 @@ It starts **SAFE**: the cannons aim but don't fire. Press **A** to arm.
 | N | next target |
 | C | back to automatic targeting (nearest) |
 | F | fire every cannon that's on target now, even when SAFE |
+| X | ignore this target for good (use it on parts of your own ship, like swivel-bearing sublevels) |
+| U | un-ignore everything |
+
+Each cannon row shows its error in degrees, its state, and `yaw/pitch now > wanted`.
 
 ## Check the aim before arming
 

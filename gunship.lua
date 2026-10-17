@@ -6,6 +6,7 @@
 -- bear, and fires each one only once its barrel is within AIM_MARGIN.
 --
 -- Keys: A arm/safe   N next target   C auto target   F fire ready cannons
+--       X ignore this target for good (parts of your own ship)   U un-ignore all
 -- While SAFE the cannons still aim, so you can check them without shooting.
 
 CANNON_SPEED = 8          -- shell speed in blocks/tick: 2 per Powder Charge (4 charges = 8)
@@ -35,7 +36,7 @@ end
 
 -- ============================================================ math
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
 local sin, cos, sqrt, abs, deg, rad = math.sin, math.cos, math.sqrt, math.abs, math.deg, math.rad
 local LOOP = 0.15
@@ -99,9 +100,9 @@ end
 local function solvePitch(R, H)
   local lo, hi = -40, 45
   local yHi = heightAt(hi, R)
-  if not yHi or yHi < H then return nil end
+  if not yHi or yHi < H then return nil, "too far" end
   local yLo = heightAt(lo, R)
-  if yLo and yLo > H then return nil end
+  if yLo and yLo > H then return nil, "too steep down" end
   for _ = 1, 18 do
     local mid = (lo + hi) / 2
     local y = heightAt(mid, R)
@@ -199,6 +200,21 @@ end
 local tracks = {}      -- eligible tracks this scan, nearest first
 local seen = {}        -- id -> { p, t, v } for speed estimates
 local lockId = nil
+local IGNORE_FILE = "/gunship_ignore"
+local ignored = {}
+do
+  if fs.exists(IGNORE_FILE) then
+    local f = fs.open(IGNORE_FILE, "r")
+    local t = textutils.unserialize(f.readAll())
+    f.close()
+    if type(t) == "table" then ignored = t end
+  end
+end
+local function saveIgnored()
+  local f = fs.open(IGNORE_FILE, "w")
+  f.write(textutils.serialize(ignored))
+  f.close()
+end
 local manualPick = false
 local radarError = nil
 
@@ -269,7 +285,7 @@ local function scan()
       s.seenAt = t
       s.cat = tostring(tr.category)
       s.kind = tostring(tr.entityType or "")
-      if TARGETS[s.cat] and not isOwnShip(tr) then
+      if TARGETS[s.cat] and not ignored[id] and not isOwnShip(tr) then
         local d = len({ x = p.x - pose.pos.x, y = p.y - pose.pos.y, z = p.z - pose.pos.z })
         if d >= MIN_RANGE and d <= MAX_RANGE then
           out[#out + 1] = { id = id, d = d, s = s }
@@ -347,7 +363,7 @@ local function solve(m, tr)
     local ay = P.y + V.y * T - shipVel.y * c - S.y
     local az = P.z + V.z * T - shipVel.z * c - S.z
     local p, t = solvePitch(sqrt(ax * ax + az * az), ay)
-    if not p then return nil, "out of range" end
+    if not p then return nil, t end
     yaw, pitch, T = yawOf({ x = ax, y = 0, z = az }), p, t
   end
   return dirOf(yaw, pitch), T
@@ -367,6 +383,7 @@ end
 
 local function aimMount(m)
   release(m)
+  m.flight, m.err, m.wantYaw, m.wantPitch = nil, nil, nil, nil
   local info = m.info
   if not info then
     m.state = "no reply"
@@ -400,6 +417,7 @@ local function aimMount(m)
     return
   end
   local sendYaw, sendPitch = wrap(yaw + YAW_OFFSET), pitch * PITCH_SIGN
+  m.wantYaw, m.wantPitch = sendYaw, sendPitch
   if not m.sentYaw or abs(wrap(sendYaw - m.sentYaw)) > 0.05 or abs(sendPitch - m.sentPitch) > 0.05 then
     pcall(peripheral.call, m.name, "setTargetAngles", sendYaw, sendPitch)
     m.sentYaw, m.sentPitch = sendYaw, sendPitch
@@ -461,6 +479,7 @@ local function draw()
     term.setTextColor(colors.orange)
     print(string.format("Target: %s %s  %.0fm  %.0f m/s %s", s.cat, s.kind:sub(1, 14), target.d, spd,
       manualPick and "[picked]" or "[auto]"))
+    print(string.format("  %+.0f blocks above you   id %s", s.p.y - pose.pos.y, target.id:sub(1, 8)))
     term.setTextColor(colors.white)
   else
     print("Target: none in range")
@@ -473,10 +492,15 @@ local function draw()
     elseif m.state == "aiming" then col = colors.yellow end
     term.setTextColor(col)
     local err = m.err and string.format("%4.1f", m.err) or "   -"
-    local line = string.format("%-18s err %s  %s", m.name:sub(1, 18), err, m.state or "")
-    if m.flight and m.state ~= "other side" and target then line = line .. string.format("  %.1fs", m.flight / 20) end
+    local line = string.format("%-8s err %s %-13s", m.name:gsub("^cannon_", ""):sub(1, 8), err, (m.state or ""):sub(1, 13))
+    if m.info and m.info.yaw then
+      line = line .. string.format(" %.0f/%.0f", m.info.yaw, m.info.pitch or 0)
+      if m.wantYaw then line = line .. string.format(">%.0f/%.0f", m.wantYaw, m.wantPitch) end
+    end
     print(line:sub(1, w))
   end
+  term.setTextColor(colors.gray)
+  if #mounts > 0 then print("          (yaw/pitch now > wanted)") end
   if #mounts == 0 then
     term.setTextColor(colors.red)
     print("No cannon mounts found (wired modems: right-click them).")
@@ -484,7 +508,7 @@ local function draw()
   term.setTextColor(colors.gray)
   local _, h = term.getSize()
   term.setCursorPos(1, h)
-  write("A arm/safe  N next  C auto  F fire ready")
+  write("A arm  N next  C auto  X ignore  U unignore  F fire")
   term.setTextColor(colors.white)
 end
 
@@ -522,6 +546,13 @@ local function keyLoop()
       nextTarget()
     elseif k == keys.c then
       lockId, manualPick = nil, false
+    elseif k == keys.x and lockId then
+      ignored[lockId] = true
+      saveIgnored()
+      lockId, manualPick = nil, false
+    elseif k == keys.u then
+      ignored = {}
+      saveIgnored()
     elseif k == keys.f then
       forceFire = true
     end
